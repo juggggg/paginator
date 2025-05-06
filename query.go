@@ -2,7 +2,6 @@ package page
 
 import (
 	"fmt"
-	"github.com/spf13/cast"
 	"gorm.io/gorm"
 	"reflect"
 	"slices"
@@ -10,8 +9,7 @@ import (
 )
 
 const (
-	DefaultSortFields  = "created_at,id"
-	DefaultPrimaryKeys = "id"
+	DefaultSortFields = "created_at"
 )
 
 var (
@@ -28,11 +26,11 @@ type Result[T any] struct {
 
 type Paginator[T any] struct {
 	DB          *gorm.DB // db提前定义好where条件
-	Fields      string   // 排序字段 按照数据库字段名
+	Fields      string   // 排序字段 按照数据库字段名 e.g. "created_at,id"sql即为 "created_at DESC,id DESC"
 	Start       int
 	Limit       int
 	Sequence    bool   // true为DESC false为ASC
-	PrimaryKeys string // 主键 e.g "tenant_id, id" 或者 "id"
+	PrimaryKeys string // 主键默认为"id" e.g 复合主键"tenant_id, id"  延迟关联需要使用
 }
 
 // 默认以created_at 降序查找
@@ -43,7 +41,7 @@ func NewPaginator[T any](db *gorm.DB, start, limit int) *Paginator[T] {
 		Sequence:    true,
 		Start:       start,
 		Limit:       limit,
-		PrimaryKeys: DefaultPrimaryKeys,
+		PrimaryKeys: "id",
 	}
 	return p
 }
@@ -56,12 +54,12 @@ func (p *Paginator[T]) SetSequence(sequence bool) *Paginator[T] {
 // e.g. "created_at,id" 以创建时间为主排序 相同时以id为次排序
 // e.g. "date" 单以日期排序
 func (p *Paginator[T]) SetFields(fields string) *Paginator[T] {
-	p.Fields = fields
+	p.Fields = strings.ReplaceAll(fields, " ", "")
 	return p
 }
 
 func (p *Paginator[T]) SetPrimaryKeys(keys string) *Paginator[T] {
-	p.PrimaryKeys = keys
+	p.PrimaryKeys = strings.ReplaceAll(keys, " ", "")
 	return p
 }
 
@@ -164,10 +162,19 @@ func getOrderFields(s string, sequence string) string {
 }
 
 func getCompareValue(s string, mapp map[string]any) string {
+	formatValue := func(v any) string {
+		switch v.(type) {
+		case string:
+			return fmt.Sprintf("'%s'", v)
+		default:
+			return fmt.Sprintf("%v", v)
+		}
+	}
+
 	if len(mapp) == 1 {
-		return cast.ToString(mapp[s])
+		return formatValue(mapp[s])
 	}
 
 	fields := strings.Split(s, ",")
-	return fmt.Sprintf("%s, %s", cast.ToString(mapp[fields[0]]), cast.ToString(mapp[fields[1]]))
+	return fmt.Sprintf("%s, %s", formatValue(mapp[fields[0]]), formatValue(mapp[fields[1]]))
 }
