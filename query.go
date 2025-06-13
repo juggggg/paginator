@@ -2,7 +2,6 @@ package page
 
 import (
 	"fmt"
-	"github.com/spf13/cast"
 	"gorm.io/gorm"
 	"reflect"
 	"slices"
@@ -10,8 +9,7 @@ import (
 )
 
 const (
-	DefaultSortFields  = "created_at,id"
-	DefaultPrimaryKeys = "id"
+	DefaultSortFields = "created_at"
 )
 
 var (
@@ -28,11 +26,11 @@ type Result[T any] struct {
 
 type Paginator[T any] struct {
 	DB          *gorm.DB // db提前定义好where条件
-	Fields      string   // 排序字段 按照数据库字段名
+	Fields      string   // 排序字段 按照数据库字段名 e.g. "created_at,id"sql即为 "created_at DESC,id DESC"
 	Start       int
 	Limit       int
 	Sequence    bool   // true为DESC false为ASC
-	PrimaryKeys string // 主键 e.g "tenant_id, id" 或者 "id"
+	PrimaryKeys string // 主键默认为"id" e.g 复合主键"tenant_id, id"  延迟关联需要使用
 }
 
 // 默认以created_at 降序查找
@@ -43,7 +41,7 @@ func NewPaginator[T any](db *gorm.DB, start, limit int) *Paginator[T] {
 		Sequence:    true,
 		Start:       start,
 		Limit:       limit,
-		PrimaryKeys: DefaultPrimaryKeys,
+		PrimaryKeys: "id",
 	}
 	return p
 }
@@ -56,12 +54,12 @@ func (p *Paginator[T]) SetSequence(sequence bool) *Paginator[T] {
 // e.g. "created_at,id" 以创建时间为主排序 相同时以id为次排序
 // e.g. "date" 单以日期排序
 func (p *Paginator[T]) SetFields(fields string) *Paginator[T] {
-	p.Fields = fields
+	p.Fields = strings.ReplaceAll(fields, " ", "")
 	return p
 }
 
 func (p *Paginator[T]) SetPrimaryKeys(keys string) *Paginator[T] {
-	p.PrimaryKeys = keys
+	p.PrimaryKeys = strings.ReplaceAll(keys, " ", "")
 	return p
 }
 
@@ -71,17 +69,19 @@ func (p *Paginator[T]) Paginate(prevToken, nextToken string) (*Result[T], error)
 		orderField = getOrderFields(p.Fields, orderMap[p.Sequence])
 	)
 
-	if err := p.DB.Count(&res.Total).Error; err != nil {
+	count, err := p.optimizedCount()
+	if err != nil {
 		return nil, err
+	} else if count == 0 {
+		return res, nil
 	}
+	res.Total = count
 
 	switch {
 	case p.Start == 0 && prevToken == "" && nextToken == "": // 普通翻页
 		p.DB = p.DB.Order(orderField).Limit(p.Limit)
 	case p.Start > 0 && prevToken == "" && nextToken == "": // 延迟关联
-		table := p.DB.Statement.Table
-		subQuery := p.DB.Select(p.PrimaryKeys).Order(orderField).Offset(p.Start).Limit(p.Limit)
-		p.DB = p.DB.Session(&gorm.Session{NewDB: true}).Table(table).Where(fmt.Sprintf("(%s) IN (?)", p.PrimaryKeys), subQuery).Order(orderField)
+		p.DB = p.getDelayedAssociationDB(orderField)
 	default: // 游标分页
 		var token string
 		if prevToken != "" {
@@ -127,8 +127,42 @@ func (p *Paginator[T]) Paginate(prevToken, nextToken string) (*Result[T], error)
 	return res, nil
 }
 
+func (p *Paginator[T]) getDelayedAssociationDB(orderField string) *gorm.DB {
+	table := p.DB.Statement.TableExpr.SQL
+	fields := strings.Join(p.DB.Statement.Selects, ",")
+	joins := p.DB.Statement.Joins
+	// 有join 关联
+	if len(joins) > 0 {
+		p.DB.Statement.Joins = nil
+	}
+	subQuery := p.DB.Select(p.PrimaryKeys).Order(orderField).Offset(p.Start).Limit(p.Limit)
+	newDB := p.DB.Session(&gorm.Session{NewDB: true}).Table(table)
+	if len(joins) > 0 {
+		newDB.Statement.Joins = joins
+	}
+	if fields != "" {
+		newDB = newDB.Select(fields)
+	}
+	return newDB.Where(fmt.Sprintf("(%s) IN (?)", p.PrimaryKeys), subQuery).Order(orderField)
+}
+
+func (p *Paginator[T]) optimizedCount() (int64, error) {
+	joins := p.DB.Statement.Joins
+	if joins != nil {
+		p.DB.Statement.Joins = nil
+	}
+	defer func() {
+		p.DB.Statement.Joins = joins
+	}()
+	
+	var total int64
+	err := p.DB.Count(&total).Error
+	return total, err
+}
+
 // 使用反射获取第一个和最后一个元素的 key 字段和 id
 func getKeyValue(obj any, sortFields string) (res map[string]any, err error) {
+	sortFields = getField(sortFields)
 	val := reflect.ValueOf(obj)
 	if val.Kind() == reflect.Ptr {
 		val = val.Elem()
@@ -164,10 +198,27 @@ func getOrderFields(s string, sequence string) string {
 }
 
 func getCompareValue(s string, mapp map[string]any) string {
+	formatValue := func(v any) string {
+		switch v.(type) {
+		case string:
+			return fmt.Sprintf("'%s'", v)
+		default:
+			return fmt.Sprintf("%v", v)
+		}
+	}
+
 	if len(mapp) == 1 {
-		return cast.ToString(mapp[s])
+		return formatValue(mapp[getField(s)])
 	}
 
 	fields := strings.Split(s, ",")
-	return fmt.Sprintf("%s, %s", cast.ToString(mapp[fields[0]]), cast.ToString(mapp[fields[1]]))
+	return fmt.Sprintf("%s, %s", formatValue(mapp[getField(fields[0])]), formatValue(mapp[getField(fields[1])]))
+}
+
+func getField(s string) string {
+	temp := strings.Split(s, ".")
+	if len(temp) >= 2 {
+		return temp[1]
+	}
+	return s
 }
