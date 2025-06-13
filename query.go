@@ -154,7 +154,7 @@ func (p *Paginator[T]) optimizedCount() (int64, error) {
 	defer func() {
 		p.DB.Statement.Joins = joins
 	}()
-	
+
 	var total int64
 	err := p.DB.Count(&total).Error
 	return total, err
@@ -213,4 +213,12 @@ func getCompareValue(s string, mapp map[string]any) string {
 
 	fields := strings.Split(s, ",")
 	return fmt.Sprintf("%s, %s", formatValue(mapp[getField(fields[0])]), formatValue(mapp[getField(fields[1])]))
+}
+
+func getField(s string) string {
+	temp := strings.Split(s, ".")
+	if len(temp) >= 2 {
+		return temp[1]
+	}
+	return s
 }
